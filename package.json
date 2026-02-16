@@ -1,0 +1,204 @@
+{
+  "name": "claude-code-toolkit",
+  "displayName": "Claude Code Toolkit",
+  "description": "Health monitoring, session management, and maintenance tools for Claude Code",
+  "version": "1.0.0",
+  "publisher": "asifkibria",
+  "icon": "images/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "ai",
+    "maintenance",
+    "sessions"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeToolkit.showDashboard",
+        "title": "Open Dashboard",
+        "category": "Claude Toolkit"
+      },
+      {
+        "command": "claudeToolkit.healthCheck",
+        "title": "Health Check",
+        "category": "Claude Toolkit"
+      },
+      {
+        "command": "claudeToolkit.searchSessions",
+        "title": "Search Conversations",
+        "category": "Claude Toolkit"
+      },
+      {
+        "command": "claudeToolkit.refreshSessions",
+        "title": "Refresh Sessions",
+        "category": "Claude Toolkit",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeToolkit.starSession",
+        "title": "Star Session",
+        "category": "Claude Toolkit",
+        "icon": "$(star-empty)"
+      },
+      {
+        "command": "claudeToolkit.unstarSession",
+        "title": "Unstar Session",
+        "category": "Claude Toolkit",
+        "icon": "$(star-full)"
+      },
+      {
+        "command": "claudeToolkit.exportSession",
+        "title": "Export Session",
+        "category": "Claude Toolkit",
+        "icon": "$(export)"
+      },
+      {
+        "command": "claudeToolkit.archiveSession",
+        "title": "Archive Session",
+        "category": "Claude Toolkit"
+      },
+      {
+        "command": "claudeToolkit.deleteSession",
+        "title": "Delete Session",
+        "category": "Claude Toolkit"
+      },
+      {
+        "command": "claudeToolkit.runMaintenance",
+        "title": "Run Maintenance",
+        "category": "Claude Toolkit"
+      },
+      {
+        "command": "claudeToolkit.securityScan",
+        "title": "Security Scan",
+        "category": "Claude Toolkit"
+      },
+      {
+        "command": "claudeToolkit.openSession",
+        "title": "Open Session",
+        "category": "Claude Toolkit"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-toolkit",
+          "title": "Claude Toolkit",
+          "icon": "images/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claude-toolkit": [
+        {
+          "id": "claudeToolkit.health",
+          "name": "Health"
+        },
+        {
+          "id": "claudeToolkit.starred",
+          "name": "Starred Sessions"
+        },
+        {
+          "id": "claudeToolkit.sessions",
+          "name": "Recent Sessions"
+        },
+        {
+          "id": "claudeToolkit.maintenance",
+          "name": "Maintenance"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "claudeToolkit.sessions",
+        "contents": "No Claude Code sessions found.\n[Run Health Check](command:claudeToolkit.healthCheck)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeToolkit.refreshSessions",
+          "when": "view == claudeToolkit.sessions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeToolkit.starSession",
+          "when": "view == claudeToolkit.sessions && viewItem == session",
+          "group": "inline"
+        },
+        {
+          "command": "claudeToolkit.exportSession",
+          "when": "viewItem == session || viewItem == starredSession",
+          "group": "1_actions"
+        },
+        {
+          "command": "claudeToolkit.archiveSession",
+          "when": "viewItem == session || viewItem == starredSession",
+          "group": "2_manage"
+        },
+        {
+          "command": "claudeToolkit.deleteSession",
+          "when": "viewItem == session",
+          "group": "2_manage"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Toolkit",
+      "properties": {
+        "claudeToolkit.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show health status in the status bar"
+        },
+        "claudeToolkit.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh session list"
+        },
+        "claudeToolkit.refreshInterval": {
+          "type": "number",
+          "default": 60,
+          "description": "Refresh interval in seconds"
+        },
+        "claudeToolkit.showNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show notifications for health issues"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/asifkibria/claude-code-toolkit-vscode"
+  },
+  "license": "MIT"
+}
