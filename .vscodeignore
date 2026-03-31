@@ -3,6 +3,10 @@
 src/**
 .gitignore
 tsconfig.json
+vitest.config.ts
 **/*.ts
 **/*.map
+**/.DS_Store
+**/CLAUDE.md
+**/.claude/**
 node_modules/**

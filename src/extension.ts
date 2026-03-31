@@ -4,9 +4,11 @@ import { SessionsProvider } from './providers/sessionsProvider';
 import { StarredProvider } from './providers/starredProvider';
 import { MaintenanceProvider } from './providers/maintenanceProvider';
 import { StatusBarManager } from './providers/statusBar';
+import { UsageCapProvider } from './providers/usageCapProvider';
 import { Toolkit } from './toolkit';
 
 let statusBar: StatusBarManager;
+let usageCapProvider: UsageCapProvider;
 let refreshInterval: NodeJS.Timeout | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -17,10 +19,16 @@ export function activate(context: vscode.ExtensionContext) {
     const starredProvider = new StarredProvider(toolkit);
     const maintenanceProvider = new MaintenanceProvider(toolkit);
 
-    vscode.window.registerTreeDataProvider('claudeToolkit.health', healthProvider);
-    vscode.window.registerTreeDataProvider('claudeToolkit.sessions', sessionsProvider);
-    vscode.window.registerTreeDataProvider('claudeToolkit.starred', starredProvider);
-    vscode.window.registerTreeDataProvider('claudeToolkit.maintenance', maintenanceProvider);
+    context.subscriptions.push(
+        vscode.window.registerTreeDataProvider('claudeToolkit.health', healthProvider),
+        vscode.window.registerTreeDataProvider('claudeToolkit.sessions', sessionsProvider),
+        vscode.window.registerTreeDataProvider('claudeToolkit.starred', starredProvider),
+        vscode.window.registerTreeDataProvider('claudeToolkit.maintenance', maintenanceProvider)
+    );
+
+    usageCapProvider = new UsageCapProvider();
+    vscode.window.registerTreeDataProvider('claudeToolkit.usageCap', usageCapProvider);
+    context.subscriptions.push(usageCapProvider);
 
     statusBar = new StatusBarManager(toolkit);
     context.subscriptions.push(statusBar);
@@ -210,17 +218,62 @@ export function activate(context: vscode.ExtensionContext) {
                 const doc = await vscode.workspace.openTextDocument(session.filePath);
                 await vscode.window.showTextDocument(doc);
             }
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.addCapTask', () => {
+            usageCapProvider.addPrompt();
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.addQuickPrompt', () => {
+            usageCapProvider.addQuickPrompt();
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.sendPrompt', (promptId: string) => {
+            usageCapProvider.sendPrompt(promptId);
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.editPrompt', (item) => {
+            if (item?.promptId) {
+                usageCapProvider.editPrompt(item.promptId);
+            }
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.removePrompt', (item) => {
+            if (item?.promptId) {
+                usageCapProvider.removePrompt(item.promptId);
+            }
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.simulateCapReached', () => {
+            usageCapProvider.simulateCapReached();
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.setCapResetTime', () => {
+            usageCapProvider.setCapWithResetTime();
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.clearCapStatus', () => {
+            usageCapProvider.clearCapStatus();
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.clearSentPrompts', () => {
+            usageCapProvider.clearSent();
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.refreshUsageCap', () => {
+            usageCapProvider.refresh();
         })
     );
 
     const config = vscode.workspace.getConfiguration('claudeToolkit');
     if (config.get('autoRefresh')) {
-        const interval = (config.get('refreshInterval') as number || 60) * 1000;
+        const interval = Math.max(10, config.get('refreshInterval') as number || 60) * 1000;
         refreshInterval = setInterval(() => {
             healthProvider.refresh();
             sessionsProvider.refresh();
             statusBar.checkHealth();
         }, interval);
+        context.subscriptions.push({ dispose: () => { if (refreshInterval) clearInterval(refreshInterval); } });
     }
 
     toolkit.healthCheck().then(health => {

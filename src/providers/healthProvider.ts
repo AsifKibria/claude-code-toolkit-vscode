@@ -24,7 +24,9 @@ export class HealthProvider implements vscode.TreeDataProvider<HealthItem> {
         return element;
     }
 
-    getChildren(): HealthItem[] {
+    getChildren(element?: HealthItem): HealthItem[] {
+        if (element) return element.children ?? [];
+
         if (!this.health) {
             return [new HealthItem('Loading...', '', vscode.TreeItemCollapsibleState.None)];
         }
