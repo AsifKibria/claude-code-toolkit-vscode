@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Claude Code Toolkit</title>
+  <defs>
+    <linearGradient id="cct-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E27B53"/>
+      <stop offset="100%" stop-color="#A8431F"/>
+    </linearGradient>
+    <linearGradient id="cct-stroke" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#FCEFE6"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" ry="56" fill="url(#cct-bg)"/>
+  <path
+    d="M 178 84 A 64 64 0 1 0 178 172"
+    fill="none"
+    stroke="url(#cct-stroke)"
+    stroke-width="34"
+    stroke-linecap="round"/>
+  <circle cx="178" cy="84" r="9" fill="#7A2F12"/>
+  <circle cx="178" cy="172" r="9" fill="#7A2F12"/>
+</svg>

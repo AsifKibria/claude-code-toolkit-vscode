@@ -61,10 +61,16 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
     private startWatching(): void {
         this.timerInterval = setInterval(() => this.tick(), 1000);
 
-        const logsDir = path.join(os.homedir(), '.claude', 'logs');
-        if (fs.existsSync(logsDir)) {
+        // Claude Code persists conversations under ~/.claude/projects/*/*.jsonl —
+        // the deprecated ~/.claude/logs path was always empty here.
+        const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+        if (fs.existsSync(projectsDir)) {
             try {
-                this.watcher = fs.watch(logsDir, () => this.checkLogs());
+                this.watcher = fs.watch(projectsDir, { recursive: true }, (_event, filename) => {
+                    if (filename && filename.endsWith('.jsonl')) {
+                        this.checkLogs();
+                    }
+                });
             } catch { }
         }
     }
@@ -80,18 +86,39 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
     }
 
     private checkLogs(): void {
-        const logsDir = path.join(os.homedir(), '.claude', 'logs');
+        const projectsDir = path.join(os.homedir(), '.claude', 'projects');
         try {
-            const files = fs.readdirSync(logsDir)
-                .filter(f => f.endsWith('.log'))
-                .map(f => ({ path: path.join(logsDir, f), mtime: fs.statSync(path.join(logsDir, f)).mtime }))
-                .sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
-                .slice(0, 3);
+            if (!fs.existsSync(projectsDir)) return;
 
-            for (const file of files) {
-                const content = fs.readFileSync(file.path, 'utf-8').slice(-10000);
+            const recent: Array<{ path: string; mtime: Date }> = [];
+            for (const project of fs.readdirSync(projectsDir)) {
+                const projectPath = path.join(projectsDir, project);
+                let entries: fs.Dirent[];
+                try {
+                    entries = fs.readdirSync(projectPath, { withFileTypes: true });
+                } catch { continue; }
+                for (const entry of entries) {
+                    if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+                    const full = path.join(projectPath, entry.name);
+                    try {
+                        recent.push({ path: full, mtime: fs.statSync(full).mtime });
+                    } catch { }
+                }
+            }
+            recent.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
-                // Look for "resets Xam" or "resets X:XXpm" pattern
+            for (const file of recent.slice(0, 3)) {
+                let content: string;
+                try {
+                    const stat = fs.statSync(file.path);
+                    const fd = fs.openSync(file.path, 'r');
+                    const readLen = Math.min(20000, stat.size);
+                    const buf = Buffer.alloc(readLen);
+                    fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
+                    fs.closeSync(fd);
+                    content = buf.toString('utf-8');
+                } catch { continue; }
+
                 const resetMatch = content.match(/resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
                 if (resetMatch && this.config.status.state !== 'cap_reached') {
                     const resetTime = this.parseResetTime(`${resetMatch[1]}${resetMatch[2] ? ':' + resetMatch[2] : ''}${resetMatch[3]}`);
@@ -101,10 +128,9 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
                     }
                 }
 
-                // Fallback: general cap detection
                 if (/hit.?your.?limit|usage.?cap|rate.?limit|too.?many.?requests/i.test(content)) {
                     if (this.config.status.state !== 'cap_reached') {
-                        this.setCapReached(60); // Default 60 min if can't parse time
+                        this.setCapReached(60);
                     }
                     return;
                 }
@@ -314,41 +340,103 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
             message += `\n\nContext: ${prompt.context}`;
         }
 
-        const sent = await this.sendToTerminal(message);
+        const target = await this.pickSendTarget();
+        if (!target) return;
+
+        const sent = target === 'chat'
+            ? await this.sendToChat(message)
+            : await this.sendToTerminal(message);
+
         if (sent) {
             prompt.status = 'sent';
             this.saveConfig();
             this._onDidChangeTreeData.fire();
-            vscode.window.showInformationMessage('Prompt sent to Claude terminal.');
-        } else {
-            vscode.window.showErrorMessage('Failed to send prompt to terminal.');
         }
     }
 
+    private async pickSendTarget(): Promise<'chat' | 'terminal' | undefined> {
+        const config = vscode.workspace.getConfiguration('claudeToolkit');
+        const remembered = config.get<string>('defaultSendTarget');
+        if (remembered === 'chat' || remembered === 'terminal') {
+            return remembered;
+        }
+
+        const choice = await vscode.window.showQuickPick([
+            { label: '$(comment-discussion) Send to Chat', description: 'Paste into the Claude Code panel', value: 'chat' as const },
+            { label: '$(terminal) Send to Terminal', description: 'Run via the claude CLI in a new terminal', value: 'terminal' as const }
+        ], { placeHolder: 'Where should this prompt go?' });
+
+        return choice?.value;
+    }
+
+    private async sendToChat(message: string): Promise<boolean> {
+        try {
+            await vscode.env.clipboard.writeText(message);
+        } catch {
+            vscode.window.showErrorMessage('Could not copy prompt to clipboard.');
+            return false;
+        }
+
+        const chatCommands = [
+            'claude-vscode.sidebar.open',
+            'claude-vscode.editor.openLast',
+            'claude-vscode.focus'
+        ];
+        let opened = false;
+        for (const cmd of chatCommands) {
+            try {
+                await vscode.commands.executeCommand(cmd);
+                opened = true;
+                break;
+            } catch { /* try the next one */ }
+        }
+        try { await vscode.commands.executeCommand('claude-vscode.focus'); } catch { /* optional */ }
+
+        if (!opened) {
+            vscode.window.showWarningMessage(
+                'Prompt copied to clipboard. Open the Claude Code panel and paste it (Cmd/Ctrl+V).'
+            );
+            return true;
+        }
+
+        vscode.window.showInformationMessage(
+            'Prompt copied — Claude Code chat focused. Press Cmd/Ctrl+V then Enter.'
+        );
+        return true;
+    }
+
     private async sendToTerminal(message: string): Promise<boolean> {
-        // The Claude Code VS Code panel is a webview, NOT a terminal
-        // We need to use an actual terminal with Claude CLI
+        // Multi-line prompts can't survive shell quoting reliably,
+        // so write the prompt to a temp file and pipe it into claude.
+        const tmpDir = path.join(os.tmpdir(), 'claude-toolkit-prompts');
+        try {
+            if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+        } catch {
+            vscode.window.showErrorMessage('Could not create temp directory for prompt.');
+            return false;
+        }
 
-        // Look for existing terminal we created
+        const tmpPath = path.join(tmpDir, `prompt-${Date.now()}.txt`);
+        try {
+            fs.writeFileSync(tmpPath, message, 'utf-8');
+        } catch {
+            vscode.window.showErrorMessage('Could not write prompt to disk.');
+            return false;
+        }
+
         let terminal = vscode.window.terminals.find(t => t.name === 'Claude Queue');
-
         if (!terminal) {
             terminal = vscode.window.createTerminal('Claude Queue');
         }
-
         terminal.show();
 
-        const escaped = message
-            .replace(/\\/g, '\\\\')
-            .replace(/"/g, '\\"')
-            .replace(/`/g, '\\`')
-            .replace(/\$/g, '\\$')
-            .replace(/!/g, '\\!')
-            .replace(/\n/g, '\\n')
-            .replace(/\r/g, '');
+        const isWin = process.platform === 'win32';
+        const command = isWin
+            ? `Get-Content -Raw "${tmpPath}" | claude`
+            : `cat "${tmpPath}" | claude`;
+        terminal.sendText(command, true);
 
-        terminal.sendText(`claude "${escaped}"`, true);
-
+        vscode.window.showInformationMessage('Prompt sent to Claude terminal.');
         return true;
     }
 
@@ -356,7 +444,6 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
         const queued = this.config.prompts.filter(p => p.status === 'queued');
         if (queued.length === 0) return;
 
-        // Sort by priority
         const sorted = [...queued].sort((a, b) => {
             const order = { high: 0, normal: 1, low: 2 };
             return order[a.priority] - order[b.priority];
@@ -375,7 +462,12 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
         );
         if (action !== 'Send') return;
 
-        const sent = await this.sendToTerminal(message);
+        const target = await this.pickSendTarget();
+        if (!target) return;
+
+        const sent = target === 'chat'
+            ? await this.sendToChat(message)
+            : await this.sendToTerminal(message);
         if (sent) {
             first.status = 'sent';
             this.saveConfig();

@@ -10,9 +10,16 @@ import { Toolkit } from './toolkit';
 let statusBar: StatusBarManager;
 let usageCapProvider: UsageCapProvider;
 let refreshInterval: NodeJS.Timeout | undefined;
+let output: vscode.OutputChannel;
+
+const DISMISS_KEY = 'claudeToolkit.dismissStartupNotice';
 
 export function activate(context: vscode.ExtensionContext) {
+    output = vscode.window.createOutputChannel('Claude Toolkit');
+    context.subscriptions.push(output);
+
     const toolkit = new Toolkit();
+    toolkit.setLogger((msg) => output.appendLine(`[${new Date().toISOString()}] ${msg}`));
 
     const healthProvider = new HealthProvider(toolkit);
     const sessionsProvider = new SessionsProvider(toolkit);
@@ -35,12 +42,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('claudeToolkit.showDashboard', async () => {
-            const result = await toolkit.startDashboard();
-            if (result.success && result.url) {
-                vscode.env.openExternal(vscode.Uri.parse(result.url));
-            } else {
-                vscode.window.showErrorMessage('Failed to start dashboard');
-            }
+            await openDashboard(toolkit);
         }),
 
         vscode.commands.registerCommand('claudeToolkit.healthCheck', async () => {
@@ -262,6 +264,60 @@ export function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('claudeToolkit.refreshUsageCap', () => {
             usageCapProvider.refresh();
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.fixSession', async (item) => {
+            const sessionId = item?.sessionId as string | undefined;
+            const result = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: sessionId ? `Fixing session ${sessionId.slice(0, 8)}…` : 'Scrubbing oversized content from all sessions…',
+                cancellable: false
+            }, () => toolkit.fixSession(sessionId));
+
+            healthProvider.refresh();
+            sessionsProvider.refresh();
+            statusBar.checkHealth();
+
+            const errorSummary = result.errors.length > 0 ? ` (${result.errors.length} error${result.errors.length === 1 ? '' : 's'})` : '';
+            if (result.fixed === 0) {
+                vscode.window.showInformationMessage(`No oversized content found across ${result.scanned} session${result.scanned === 1 ? '' : 's'}.${errorSummary}`);
+            } else {
+                vscode.window.showInformationMessage(`Fixed ${result.fixed} session${result.fixed === 1 ? '' : 's'} (scanned ${result.scanned}).${errorSummary}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('claudeToolkit.unstickSession', async (item) => {
+            const sessionId = item?.sessionId as string | undefined;
+            if (!sessionId) {
+                vscode.window.showWarningMessage('Pick a session from the sidebar to unstick.');
+                return;
+            }
+
+            const confirm = await vscode.window.showWarningMessage(
+                'Unstick this session? This scrubs oversized content and clears any per-session error state. A backup is created.',
+                { modal: true },
+                'Unstick'
+            );
+            if (confirm !== 'Unstick') return;
+
+            const result = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: `Unsticking ${sessionId.slice(0, 8)}…`,
+                cancellable: false
+            }, () => toolkit.unstickSession(sessionId));
+
+            sessionsProvider.refresh();
+            healthProvider.refresh();
+
+            if (!result.ok) {
+                vscode.window.showErrorMessage(`Could not unstick session: ${result.reason ?? 'unknown error'}`);
+                return;
+            }
+
+            const summary = result.scrubbed > 0
+                ? `Scrubbed ${result.scrubbed} oversized item${result.scrubbed === 1 ? '' : 's'}. Reload the conversation in Claude Code (Cmd+Shift+P → "Claude Code: New Conversation") to clear in-memory state.`
+                : 'No oversized content found. If Claude Code is still stuck, run "Claude Code: New Conversation" to clear its in-memory state.';
+            vscode.window.showInformationMessage(summary);
         })
     );
 
@@ -276,20 +332,65 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push({ dispose: () => { if (refreshInterval) clearInterval(refreshInterval); } });
     }
 
-    toolkit.healthCheck().then(health => {
-        statusBar.update(health);
-
-        if (config.get('showNotifications') && health.issues > 0) {
-            vscode.window.showWarningMessage(
-                `Claude Toolkit: ${health.issues} issue(s) detected`,
-                'View'
-            ).then(selection => {
-                if (selection === 'View') {
-                    vscode.commands.executeCommand('claudeToolkit.showDashboard');
-                }
-            });
-        }
+    runStartupFlow(context, toolkit, config).catch((err) => {
+        output.appendLine(`Startup flow failed: ${err instanceof Error ? err.message : String(err)}`);
     });
+}
+
+async function runStartupFlow(
+    context: vscode.ExtensionContext,
+    toolkit: Toolkit,
+    config: vscode.WorkspaceConfiguration
+): Promise<void> {
+    const health = await toolkit.healthCheck();
+    statusBar.update(health);
+
+    if (config.get<boolean>('autoOpenDashboard')) {
+        output.appendLine('autoOpenDashboard is enabled — launching dashboard');
+        await openDashboard(toolkit, { silent: true });
+        return;
+    }
+
+    if (!config.get<boolean>('showNotifications') || health.issues === 0) return;
+    if (context.globalState.get<boolean>(DISMISS_KEY)) return;
+
+    const open = 'Open Dashboard';
+    const dismiss = 'Dismiss';
+    const never = "Don't show again";
+    const message = `Claude Toolkit: ${health.issues} issue${health.issues === 1 ? '' : 's'} detected`;
+    const choice = await vscode.window.showWarningMessage(message, open, dismiss, never);
+
+    if (choice === open) {
+        await openDashboard(toolkit);
+    } else if (choice === never) {
+        await context.globalState.update(DISMISS_KEY, true);
+    }
+}
+
+async function openDashboard(toolkit: Toolkit, opts: { silent?: boolean } = {}): Promise<void> {
+    const config = vscode.workspace.getConfiguration('claudeToolkit');
+    const port = config.get<number>('dashboardPort') ?? 1405;
+
+    const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: 'Starting Claude Toolkit dashboard…' },
+        () => toolkit.startDashboard(port)
+    );
+
+    if (result.success && result.url) {
+        await vscode.env.openExternal(vscode.Uri.parse(result.url));
+        return;
+    }
+
+    const detail = result.error ?? 'Unknown error';
+    output.appendLine(`Dashboard failed to start: ${detail}`);
+    if (opts.silent) return;
+
+    const showLogs = 'Show Logs';
+    const choice = await vscode.window.showErrorMessage(
+        `Failed to start dashboard: ${detail}`,
+        showLogs
+    );
+    if (choice === showLogs) output.show();
 }
 
 export function deactivate() {

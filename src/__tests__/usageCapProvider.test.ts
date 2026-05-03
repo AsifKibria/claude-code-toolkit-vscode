@@ -64,7 +64,7 @@ vi.mock("os", () => ({
 
 async function getProvider() {
   vi.resetModules();
-  vi.doMock("os", () => ({ homedir: () => TEST_HOME }));
+  vi.doMock("os", () => ({ homedir: () => TEST_HOME, tmpdir: () => "/tmp" }));
   const mod = await import("../providers/usageCapProvider.js");
   return mod;
 }
@@ -176,69 +176,83 @@ describe("UsageCapProvider", () => {
     });
   });
 
-  describe("sendToTerminal escaping", () => {
-    it("should escape backticks to prevent command substitution", async () => {
+  describe("sendToTerminal (multi-line safe via temp file)", () => {
+    function setupTerminal() {
+      const calls: string[] = [];
+      const mockTerminal = {
+        show: vi.fn(),
+        sendText: vi.fn((text: string) => { calls.push(text); }),
+        name: "Claude Queue",
+      };
+      return { mockTerminal, calls };
+    }
+
+    it("preserves dangerous shell characters by writing to a temp file (no inline escaping)", async () => {
       const { UsageCapProvider } = await getProvider();
       const vscode = await import("vscode");
-      const mockTerminal = { show: vi.fn(), sendText: vi.fn(), name: "Claude Queue" };
+      const { mockTerminal, calls } = setupTerminal();
       (vscode.window.createTerminal as any).mockReturnValue(mockTerminal);
       (vscode.window.terminals as any) = [];
 
       const provider = new UsageCapProvider();
-      await (provider as any).sendToTerminal("run `ls -la`");
+      const dangerous = 'run `ls -la` && echo $(whoami) "now"';
+      await (provider as any).sendToTerminal(dangerous);
 
-      const sentText: string = mockTerminal.sendText.mock.calls[0]?.[0] ?? "";
-      expect(sentText).not.toMatch(/`ls -la`/);
-      expect(sentText).toContain("\\`");
+      // The shell command should NOT contain the user payload — it should reference a tmp file.
+      const sentText = calls[0] ?? "";
+      expect(sentText).toMatch(/(cat|Get-Content)\s+["']?\/tmp\/claude-toolkit-prompts\/prompt-\d+\.txt/);
+      expect(sentText).not.toContain("ls -la");
+      expect(sentText).not.toContain("whoami");
+
+      // The temp file should hold the original text verbatim — that's the whole point.
+      const match = sentText.match(/["']([^"']+\.txt)["']/);
+      expect(match).toBeTruthy();
+      const tmpPath = match![1];
+      expect(fs.readFileSync(tmpPath, "utf-8")).toBe(dangerous);
+      fs.unlinkSync(tmpPath);
+
       provider.dispose();
     });
 
-    it("should escape $() to prevent command substitution", async () => {
+    it("preserves multi-line prompts verbatim on disk", async () => {
       const { UsageCapProvider } = await getProvider();
       const vscode = await import("vscode");
-      const mockTerminal = { show: vi.fn(), sendText: vi.fn(), name: "Claude Queue" };
+      const { mockTerminal, calls } = setupTerminal();
       (vscode.window.createTerminal as any).mockReturnValue(mockTerminal);
       (vscode.window.terminals as any) = [];
 
       const provider = new UsageCapProvider();
-      await (provider as any).sendToTerminal("do $(whoami)");
+      const multiline = "line one\nline two\nline three";
+      await (provider as any).sendToTerminal(multiline);
 
-      const sentText: string = mockTerminal.sendText.mock.calls[0]?.[0] ?? "";
-      // After escaping, $ becomes \$, so the terminal never sees unescaped $(whoami)
-      expect(sentText).toContain("\\$");
-      // The resulting command should not have an unescaped $( — it must be \$(
-      expect(sentText).not.toMatch(/(?<!\\)\$\(/g);
+      const match = (calls[0] ?? "").match(/["']([^"']+\.txt)["']/);
+      expect(match).toBeTruthy();
+      const tmpPath = match![1];
+      expect(fs.readFileSync(tmpPath, "utf-8")).toBe(multiline);
+      fs.unlinkSync(tmpPath);
+
       provider.dispose();
     });
+  });
 
-    it("should escape double quotes", async () => {
+  describe("sendToChat (clipboard handoff)", () => {
+    it("writes the prompt to the clipboard and tries to focus the Claude Code chat", async () => {
       const { UsageCapProvider } = await getProvider();
       const vscode = await import("vscode");
-      const mockTerminal = { show: vi.fn(), sendText: vi.fn(), name: "Claude Queue" };
-      (vscode.window.createTerminal as any).mockReturnValue(mockTerminal);
-      (vscode.window.terminals as any) = [];
+
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      (vscode as any).env = { clipboard: { writeText } };
+      const executeCommand = vi.fn().mockResolvedValue(undefined);
+      (vscode as any).commands = { executeCommand };
 
       const provider = new UsageCapProvider();
-      await (provider as any).sendToTerminal('He said "hello"');
+      const ok = await (provider as any).sendToChat("hello\nworld");
+      expect(ok).toBe(true);
+      expect(writeText).toHaveBeenCalledWith("hello\nworld");
+      // We should have tried at least one Claude Code command.
+      const cmds = executeCommand.mock.calls.map((c: any[]) => c[0]);
+      expect(cmds.some((c: string) => c.startsWith("claude-vscode."))).toBe(true);
 
-      const sentText: string = mockTerminal.sendText.mock.calls[0]?.[0] ?? "";
-      expect(sentText).toContain('\\"');
-      provider.dispose();
-    });
-
-    it("should convert newlines to \\n for single-line terminal command", async () => {
-      const { UsageCapProvider } = await getProvider();
-      const vscode = await import("vscode");
-      const mockTerminal = { show: vi.fn(), sendText: vi.fn(), name: "Claude Queue" };
-      (vscode.window.createTerminal as any).mockReturnValue(mockTerminal);
-      (vscode.window.terminals as any) = [];
-
-      const provider = new UsageCapProvider();
-      await (provider as any).sendToTerminal("line one\nline two");
-
-      const sentText: string = mockTerminal.sendText.mock.calls[0]?.[0] ?? "";
-      expect(sentText).not.toMatch(/\n(?!n)/);
-      expect(sentText).toContain("\\n");
       provider.dispose();
     });
   });

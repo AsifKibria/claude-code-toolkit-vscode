@@ -1,83 +1,45 @@
-# Claude Code Toolkit for VS Code
+<p align="left">
+  <img src="images/icon.png" width="96" height="96" alt="Claude Code Toolkit logo"/>
+</p>
 
-Health monitoring, session management, and maintenance tools for Claude Code - directly in VS Code.
+# Claude Code Toolkit — VS Code
 
-## Features
+Health monitoring, session rescue, prompt queue, and dashboard for [Claude Code](https://claude.ai/code), right in the VS Code sidebar.
 
-### Status Bar Health Indicator
-- Real-time health status in the VS Code status bar
-- Click to run a health check
-- Visual warnings when issues are detected
+## TL;DR — what it does
 
-### Session Management
-- Browse recent Claude Code sessions
-- Star/bookmark important sessions
-- Search across all conversations
-- Export sessions to HTML, Markdown, or JSON
-- Archive or delete old sessions
+- **Status bar:** live health indicator. Click it to run a health check.
+- **Sidebar → Health / Sessions / Starred / Maintenance:** browse, star, export, archive, delete.
+- **Sidebar → Prompt Queue:** queue prompts for when you hit a usage cap; auto-fires when the cap resets.
+- **Right-click any session → Fix Oversized Content / Unstick Session:** rescue sessions stuck on `PDF too large` (issue #13518).
 
-### Maintenance Tools
-- One-click maintenance operations
-- Security scanning for leaked secrets
-- Open the full web dashboard
+## Install
 
-### Command Palette
-All features accessible via Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`):
-- `Claude Toolkit: Health Check`
-- `Claude Toolkit: Search Conversations`
-- `Claude Toolkit: Open Dashboard`
-- `Claude Toolkit: Run Maintenance`
-- `Claude Toolkit: Security Scan`
+1. Install the [npm CLI](https://www.npmjs.com/package/@asifkibria/claude-code-toolkit): `npm i -g @asifkibria/claude-code-toolkit`
+2. Install this extension from the VS Code Marketplace.
+3. Look for the Claude Toolkit icon in the Activity Bar.
 
-## Requirements
+## Settings
 
-- [Claude Code](https://claude.ai/code) installed
-- Node.js 18+
-- The Claude Code Toolkit npm package will be installed automatically
+| Setting | Default | What it does |
+|---|---|---|
+| `claudeToolkit.showStatusBar` | `true` | Show health in the status bar |
+| `claudeToolkit.autoRefresh` | `true` | Auto-refresh sidebar |
+| `claudeToolkit.refreshInterval` | `60` | Refresh interval (seconds) |
+| `claudeToolkit.showNotifications` | `true` | Notify on issues |
+| `claudeToolkit.autoOpenDashboard` | `false` | Open dashboard at VS Code startup |
+| `claudeToolkit.dashboardPort` | `1405` | Dashboard port |
+| `claudeToolkit.defaultSendTarget` | `ask` | Where queued prompts go: `ask` / `chat` / `terminal` |
 
-## Installation
+## Send queued prompts to chat or terminal
 
-1. Install from VS Code Marketplace
-2. The extension activates automatically when VS Code starts
-3. Look for the Claude Toolkit icon in the Activity Bar
+When you click a queued prompt, the extension asks where to send it:
 
-## Configuration
+- **Chat:** copies the prompt to clipboard, focuses the Claude Code chat panel — paste with Cmd/Ctrl+V.
+- **Terminal:** writes the prompt to a temp file and pipes it into `claude` (multi-line safe).
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `claudeToolkit.showStatusBar` | `true` | Show health indicator in status bar |
-| `claudeToolkit.autoRefresh` | `true` | Auto-refresh session list |
-| `claudeToolkit.refreshInterval` | `60` | Refresh interval in seconds |
-| `claudeToolkit.showNotifications` | `true` | Show notifications for issues |
-
-## Sidebar Views
-
-### Health
-Shows current health status, session count, and any warnings or issues.
-
-### Starred Sessions
-Quick access to your bookmarked/starred sessions.
-
-### Recent Sessions
-Browse your most recent Claude Code conversations. Right-click for actions:
-- Star/Unstar
-- Export (HTML/Markdown/JSON)
-- Archive
-- Delete
-
-### Maintenance
-Quick actions for maintenance tasks:
-- Run Maintenance
-- Security Scan
-- Open Dashboard
-- Health Check
+Set `claudeToolkit.defaultSendTarget` to skip the prompt next time.
 
 ## License
 
-MIT
-
-## Links
-
-- [Claude Code Toolkit on npm](https://www.npmjs.com/package/@asifkibria/claude-code-toolkit)
-- [GitHub Repository](https://github.com/asifkibria/claude-code-toolkit-vscode)
-- [Report Issues](https://github.com/asifkibria/claude-code-toolkit-vscode/issues)
+MIT · [GitHub](https://github.com/asifkibria/claude-code-toolkit-vscode) · [npm CLI](https://www.npmjs.com/package/@asifkibria/claude-code-toolkit)

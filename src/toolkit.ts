@@ -51,15 +51,22 @@ export interface ConversationMessage {
     timestamp?: string;
 }
 
+export type LogFn = (message: string) => void;
+
 export class Toolkit {
     private claudeDir: string;
     private projectsDir: string;
     private bookmarksPath: string;
+    private log: LogFn = () => {};
 
     constructor() {
         this.claudeDir = path.join(os.homedir(), '.claude');
         this.projectsDir = path.join(this.claudeDir, 'projects');
         this.bookmarksPath = path.join(this.claudeDir, 'bookmarks.json');
+    }
+
+    setLogger(fn: LogFn): void {
+        this.log = fn;
     }
 
     async healthCheck(): Promise<HealthResult> {
@@ -108,10 +115,11 @@ export class Toolkit {
                 lastCheck: new Date()
             };
         } catch (error) {
+            this.log(`healthCheck failed: ${error instanceof Error ? error.message : String(error)}`);
             return {
                 healthy: false,
                 issues: 1,
-                warnings: [`Health check error: ${error}`],
+                warnings: ['Health check failed — see Claude Toolkit output for details'],
                 diskUsage: { used: 0, total: 0 },
                 sessionCount: 0,
                 lastCheck: new Date()
@@ -448,6 +456,101 @@ code { font-family: 'SF Mono', Monaco, monospace; }
         await this.unstarSession(sessionId);
     }
 
+    async fixSession(sessionId?: string): Promise<{ scanned: number; fixed: number; errors: string[] }> {
+        const errors: string[] = [];
+        let scanned = 0;
+        let fixed = 0;
+
+        const sessions = sessionId
+            ? [await this.getSession(sessionId)].filter((s): s is SessionInfo => Boolean(s))
+            : await this.listSessions(1000);
+
+        for (const session of sessions) {
+            scanned++;
+            const fixedThis = await this.scrubOversizedContent(session.filePath).catch((err) => {
+                errors.push(`${session.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`);
+                return 0;
+            });
+            if (fixedThis > 0) fixed += 1;
+        }
+        return { scanned, fixed, errors };
+    }
+
+    async unstickSession(sessionId: string): Promise<{ ok: boolean; reason?: string; scrubbed: number }> {
+        const session = await this.getSession(sessionId);
+        if (!session) return { ok: false, reason: 'Session not found', scrubbed: 0 };
+
+        const scrubbed = await this.scrubOversizedContent(session.filePath).catch(() => 0);
+
+        // Drop any per-session warning state Claude Code keeps next to it.
+        // These flags are what cause a "stuck" session to keep replaying the same error.
+        const warningPath = path.join(this.claudeDir, `security_warnings_state_${sessionId}.json`);
+        try { if (fs.existsSync(warningPath)) await fsp.unlink(warningPath); } catch { /* best-effort */ }
+
+        return { ok: true, scrubbed };
+    }
+
+    private async scrubOversizedContent(filePath: string): Promise<number> {
+        const MAX_BASE64 = 200 * 1024; // ~200 KB before encoding overhead — matches CLI default
+        const MAX_TEXT = 100 * 1024;
+
+        let raw: string;
+        try { raw = await fsp.readFile(filePath, 'utf-8'); } catch { return 0; }
+
+        const lines = raw.split('\n');
+        let modifications = 0;
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (!line.trim()) continue;
+            let entry: any;
+            try { entry = JSON.parse(line); } catch { continue; }
+
+            const content = entry?.message?.content ?? entry?.content;
+            if (!Array.isArray(content)) continue;
+
+            let changed = false;
+            for (let j = 0; j < content.length; j++) {
+                const item = content[j];
+                if (!item || typeof item !== 'object') continue;
+                const replacement = this.replacementForOversized(item, MAX_BASE64, MAX_TEXT);
+                if (replacement) {
+                    content[j] = replacement;
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                lines[i] = JSON.stringify(entry);
+                modifications++;
+            }
+        }
+
+        if (modifications === 0) return 0;
+
+        const backupDir = path.join(this.claudeDir, 'backups');
+        try { await fsp.mkdir(backupDir, { recursive: true }); } catch { /* best-effort */ }
+        const backupPath = path.join(backupDir, `${path.basename(filePath)}.${Date.now()}.bak`);
+        try { await fsp.copyFile(filePath, backupPath); } catch { /* best-effort */ }
+
+        await fsp.writeFile(filePath, lines.join('\n'), 'utf-8');
+        return modifications;
+    }
+
+    private replacementForOversized(item: any, maxBase64: number, maxText: number): any | null {
+        if (item.type === 'image' || item.type === 'document') {
+            const data = item?.source?.data;
+            if (typeof data === 'string' && data.length > maxBase64) {
+                const label = item.type === 'document' && item?.source?.media_type?.includes('pdf') ? 'PDF' : item.type === 'document' ? 'Document' : 'Image';
+                return { type: 'text', text: `[${label} removed by Claude Toolkit — exceeded ${Math.round(maxBase64 / 1024)} KB limit]` };
+            }
+        }
+        if (item.type === 'text' && typeof item.text === 'string' && item.text.length > maxText) {
+            return { type: 'text', text: `[Text content truncated by Claude Toolkit — was ${item.text.length} chars]\n\n${item.text.slice(0, maxText)}` };
+        }
+        return null;
+    }
+
     async runMaintenance(): Promise<MaintenanceResult> {
         let cleaned = 0;
         let freedBytes = 0;
@@ -541,20 +644,94 @@ code { font-family: 'SF Mono', Monaco, monospace; }
         };
     }
 
-    async startDashboard(): Promise<{ success: boolean; url?: string }> {
-        const { spawn } = require('child_process') as typeof import('child_process');
-        const port = 1405;
+    async startDashboard(port = 1405): Promise<{ success: boolean; url?: string; error?: string }> {
         const url = `http://localhost:${port}`;
+
+        if (await this.isPortAlive(port)) {
+            this.log(`Dashboard already running on port ${port}; reusing ${url}`);
+            return { success: true, url };
+        }
+
+        const { spawn } = await import('child_process');
+        const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+        const args = ['-y', '@asifkibria/claude-code-toolkit', 'dashboard', '--port', String(port)];
+
+        this.log(`Launching dashboard: ${command} ${args.join(' ')}`);
+
         return new Promise((resolve) => {
-            const child = spawn('npx', ['-y', '@asifkibria/claude-code-toolkit', 'dashboard', '--port', String(port)], {
-                detached: true,
-                stdio: 'ignore',
-                shell: process.platform === 'win32',
+            let settled = false;
+            const finish = (result: { success: boolean; url?: string; error?: string }) => {
+                if (settled) return;
+                settled = true;
+                resolve(result);
+            };
+
+            let child: import('child_process').ChildProcess;
+            try {
+                child = spawn(command, args, {
+                    detached: true,
+                    stdio: 'ignore',
+                    windowsHide: true,
+                });
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                this.log(`Dashboard spawn threw: ${msg}`);
+                finish({ success: false, error: msg });
+                return;
+            }
+
+            child.on('error', (err: NodeJS.ErrnoException) => {
+                const msg = err.code === 'ENOENT'
+                    ? 'Node.js / npx was not found on your PATH. Install Node.js 18+ and reload VS Code.'
+                    : err.message;
+                this.log(`Dashboard error: ${msg}`);
+                finish({ success: false, error: msg });
             });
+
+            child.on('exit', (code, signal) => {
+                if (code !== 0 && code !== null) {
+                    this.log(`Dashboard child exited early with code ${code} (signal ${signal ?? 'none'})`);
+                    finish({ success: false, error: `Dashboard process exited with code ${code}` });
+                }
+            });
+
             child.unref();
-            setTimeout(() => resolve({ success: true, url }), 1500);
-            child.on('error', () => resolve({ success: false }));
+
+            this.waitForPort(port, 15000).then((alive) => {
+                if (alive) {
+                    this.log(`Dashboard is listening on ${url}`);
+                    finish({ success: true, url });
+                } else {
+                    this.log(`Dashboard did not start listening on port ${port} within 15s`);
+                    finish({ success: false, error: `Dashboard did not start on port ${port} in time` });
+                }
+            });
         });
+    }
+
+    private isPortAlive(port: number): Promise<boolean> {
+        return new Promise((resolve) => {
+            const net = require('net') as typeof import('net');
+            const socket = new net.Socket();
+            const done = (alive: boolean) => {
+                socket.destroy();
+                resolve(alive);
+            };
+            socket.setTimeout(500);
+            socket.once('connect', () => done(true));
+            socket.once('timeout', () => done(false));
+            socket.once('error', () => done(false));
+            socket.connect(port, '127.0.0.1');
+        });
+    }
+
+    private async waitForPort(port: number, timeoutMs: number): Promise<boolean> {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (await this.isPortAlive(port)) return true;
+            await new Promise((r) => setTimeout(r, 250));
+        }
+        return false;
     }
 
     private formatBytes(bytes: number): string {
