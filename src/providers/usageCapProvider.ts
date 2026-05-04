@@ -58,11 +58,34 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
         } catch { }
     }
 
+    /** Minimum seconds between consecutive auto-fired cap notifications. */
+    private static AUTO_DETECT_COOLDOWN_S = 5 * 60;
+    /** Per-file byte offset of the last position we already scanned. Prevents
+     *  the same regex hit from firing repeatedly on every file write. */
+    private fileOffsets: Map<string, number> = new Map();
+    /** Timestamp of the last auto-fired notification (any kind). */
+    private lastAutoFireMs = 0;
+
+    private autoDetectEnabled(): boolean {
+        return vscode.workspace.getConfiguration('claudeToolkit').get<boolean>('autoDetectCap', false);
+    }
+
     private startWatching(): void {
         this.timerInterval = setInterval(() => this.tick(), 1000);
 
-        // Claude Code persists conversations under ~/.claude/projects/*/*.jsonl —
-        // the deprecated ~/.claude/logs path was always empty here.
+        // If auto-detect was off and a previous run wrote a stale `cap_reached`
+        // entry whose resetTime is already in the past, silently clear it
+        // instead of firing a "Cap reset!" toast on every VS Code start.
+        if (this.config.status.source === 'auto' &&
+            this.config.status.state === 'cap_reached' &&
+            this.config.status.resetTime &&
+            new Date(this.config.status.resetTime) <= new Date()) {
+            this.config.status = { state: 'normal', source: 'auto' };
+            this.saveConfig();
+        }
+
+        if (!this.autoDetectEnabled()) return;
+
         const projectsDir = path.join(os.homedir(), '.claude', 'projects');
         if (fs.existsSync(projectsDir)) {
             try {
@@ -86,6 +109,11 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
     }
 
     private checkLogs(): void {
+        if (!this.autoDetectEnabled()) return;
+        if (this.config.status.state === 'cap_reached') return;
+        // Cooldown: don't fire more than once per AUTO_DETECT_COOLDOWN_S.
+        if (Date.now() - this.lastAutoFireMs < UsageCapProvider.AUTO_DETECT_COOLDOWN_S * 1000) return;
+
         const projectsDir = path.join(os.homedir(), '.claude', 'projects');
         try {
             if (!fs.existsSync(projectsDir)) return;
@@ -108,34 +136,92 @@ export class UsageCapProvider implements vscode.TreeDataProvider<CapTreeItem>, v
             recent.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
             for (const file of recent.slice(0, 3)) {
-                let content: string;
-                try {
-                    const stat = fs.statSync(file.path);
-                    const fd = fs.openSync(file.path, 'r');
-                    const readLen = Math.min(20000, stat.size);
-                    const buf = Buffer.alloc(readLen);
-                    fs.readSync(fd, buf, 0, readLen, Math.max(0, stat.size - readLen));
-                    fs.closeSync(fd);
-                    content = buf.toString('utf-8');
-                } catch { continue; }
+                let stat: fs.Stats;
+                try { stat = fs.statSync(file.path); } catch { continue; }
 
-                const resetMatch = content.match(/resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
-                if (resetMatch && this.config.status.state !== 'cap_reached') {
-                    const resetTime = this.parseResetTime(`${resetMatch[1]}${resetMatch[2] ? ':' + resetMatch[2] : ''}${resetMatch[3]}`);
-                    if (resetTime) {
-                        this.setCapReachedWithTime(resetTime);
-                        return;
-                    }
+                // Only scan content APPENDED since the last check on this file.
+                // First sighting: anchor at the current end so we never re-scan history.
+                const lastOffset = this.fileOffsets.get(file.path);
+                if (lastOffset === undefined) {
+                    this.fileOffsets.set(file.path, stat.size);
+                    continue;
                 }
+                if (stat.size <= lastOffset) continue;
 
-                if (/hit.?your.?limit|usage.?cap|rate.?limit|too.?many.?requests/i.test(content)) {
-                    if (this.config.status.state !== 'cap_reached') {
-                        this.setCapReached(60);
-                    }
-                    return;
+                let buf: Buffer;
+                try {
+                    const fd = fs.openSync(file.path, 'r');
+                    const readLen = stat.size - lastOffset;
+                    buf = Buffer.alloc(readLen);
+                    fs.readSync(fd, buf, 0, readLen, lastOffset);
+                    fs.closeSync(fd);
+                } catch { continue; }
+                this.fileOffsets.set(file.path, stat.size);
+
+                const newContent = buf.toString('utf-8');
+                if (this.detectCapInDelta(newContent)) {
+                    return; // notification fired — stop scanning
                 }
             }
         } catch { }
+    }
+
+    /**
+     * Inspects newly-appended JSONL lines for *real* Anthropic cap signals.
+     * Skips user/assistant message content — only matches inside structured
+     * error responses or `is_error` tool_result blocks. Returns true if a
+     * cap was detected and a notification was fired.
+     */
+    private detectCapInDelta(deltaText: string): boolean {
+        const CAP_PATTERN = /rate[ _-]?limit|usage[ _-]?(cap|limit)|too[ _-]?many[ _-]?requests|429|invalid_request_error.*plan/i;
+
+        for (const rawLine of deltaText.split('\n')) {
+            const line = rawLine.trim();
+            if (!line || !line.startsWith('{')) continue;
+
+            let entry: Record<string, unknown>;
+            try { entry = JSON.parse(line); } catch { continue; }
+
+            // Skip user/assistant message content — that's where false positives live.
+            const type = entry.type as string | undefined;
+            if (type === 'user' || type === 'assistant') {
+                // Special case: assistant messages can carry an `is_error` tool_result block
+                // returned by an upstream tool. Walk the content array to check.
+                const message = entry.message as Record<string, unknown> | undefined;
+                const content = message?.content;
+                if (!Array.isArray(content)) continue;
+                for (const block of content as Record<string, unknown>[]) {
+                    if (block.type !== 'tool_result' || !block.is_error) continue;
+                    const inner = typeof block.content === 'string' ? block.content : JSON.stringify(block.content || '');
+                    if (CAP_PATTERN.test(inner)) {
+                        this.fireCapDetected(inner);
+                        return true;
+                    }
+                }
+                continue;
+            }
+
+            // Top-level error/system entries — look at the whole serialized line.
+            if (type === 'error' || type === 'api_error' || type === 'system') {
+                if (CAP_PATTERN.test(line)) {
+                    this.fireCapDetected(line);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private fireCapDetected(evidence: string): void {
+        this.lastAutoFireMs = Date.now();
+        // Try to extract a reset time from the surrounding evidence — Anthropic
+        // cap errors sometimes embed something like "resets at 4am" or an ISO ts.
+        const tsMatch = evidence.match(/resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+        if (tsMatch) {
+            const resetTime = this.parseResetTime(`${tsMatch[1]}${tsMatch[2] ? ':' + tsMatch[2] : ''}${tsMatch[3]}`);
+            if (resetTime) { this.setCapReachedWithTime(resetTime); return; }
+        }
+        this.setCapReached(60);
     }
 
     private setCapReachedWithTime(resetTime: Date): void {

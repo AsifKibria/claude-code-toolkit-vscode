@@ -51,6 +51,11 @@ vi.mock("vscode", () => {
         name: "Claude Queue",
       }),
     },
+    workspace: {
+      getConfiguration: vi.fn().mockReturnValue({
+        get: (key: string, fallback?: unknown) => fallback,
+      }),
+    },
   };
 });
 

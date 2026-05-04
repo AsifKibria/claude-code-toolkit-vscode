@@ -304,6 +304,11 @@
           ],
           "default": "ask",
           "description": "Where queued prompts should be sent. 'chat' pastes into the Claude Code panel; 'terminal' pipes through the claude CLI; 'ask' prompts each time."
+        },
+        "claudeToolkit.autoDetectCap": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-detect Claude Code usage-cap errors by watching ~/.claude/projects/*.jsonl. OFF by default because earlier versions matched on raw conversation content (false positives whenever 'rate limit' or similar phrases appeared in chat). When enabled, only matches inside actual API error structures, scans only newly-appended bytes, and throttles repeat fires to once per 5 minutes."
         }
       }
     }
