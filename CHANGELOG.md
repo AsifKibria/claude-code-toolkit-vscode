@@ -3,6 +3,18 @@
 All notable changes to the **Claude Code Toolkit** VS Code extension.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.0.1] — 2026-05
+
+### Fixed
+
+- **Phantom "Usage cap reached" / "Usage cap reset" notifications.** The cap auto-detector was running a loose regex (`/rate.?limit|usage.?cap|too.?many.?requests/i`) over the raw text of `~/.claude/projects/*.jsonl`, which includes every user message and assistant reply. Any chat that mentioned rate limits, scheduling, or "resets at 4am" matched and fired a false toast. Two parallel issues compounded it: stale `cap_reached` state from earlier false positives kept replaying on VS Code start, and the watcher had no cooldown so the same regex hit fired on every file write.
+
+### Changed
+
+- **Auto cap-detection is now opt-in** — new `claudeToolkit.autoDetectCap` setting, defaults to `false`. Manual `Set Reset Time` button is unaffected.
+- When auto-detection is enabled, it now: only matches inside actual API error structures (`tool_result` blocks with `is_error: true`, top-level `type: "error"`/`api_error` entries), only scans bytes appended since the last check (per-file offset map), and throttles repeat fires to once per 5 minutes.
+- On extension start, stale `auto`-sourced `cap_reached` state with a past reset time is silently cleared instead of firing a "Cap reset!" toast.
+
 ## [2.0.0] — 2026-05
 
 ### Added
